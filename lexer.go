@@ -236,40 +236,38 @@ func (s *Scanner) scan() (tok int, pos Pos, lit string) {
 		specialComment := s.specialComment
 		tok, pos, lit = specialComment.scan()
 		if tok != 0 {
-			// return the specialComment scan result as the result
+			// return the specialComment scan result as the result.
 			return
 		}
 		// leave specialComment scan mode after all stream consumed.
 		s.specialComment = nil
 	}
 
-	ch0 := s.r.peek()
-	if unicode.IsSpace(ch0) {
-		ch0 = s.skipWhitespace()
-	}
-	pos = s.r.pos()
+	// skip white spaces.
+	ch := s.skipWhitespace()
 	if s.r.eof() {
-		// when scanner meets EOF, the returned token should be 0,
-		// because 0 is a special token id to remind the parser that stream is end.
-		return 0, pos, ""
+		// when scanner meets EOF, the returned token should be 0, because 0 is
+		// a special token id to remind the parser that stream is end.
+		return 0, s.r.pos(), ""
 	}
 
-	if !s.r.eof() && isIdentExtend(ch0) {
+	if isIdentExtend(ch) {
 		return scanIdentifier(s)
 	}
 
 	// search a trie to get a token.
+	pos = s.r.pos()
 	node := &ruleTable
-	for ch0 >= 0 && ch0 <= 255 {
-		if node.childs[ch0] == nil || s.r.eof() {
+	for ch >= 0 && ch <= 255 {
+		if node.childs[ch] == nil || s.r.eof() {
 			break
 		}
-		node = node.childs[ch0]
+		node = node.childs[ch]
 		if node.fn != nil {
 			return node.fn(s)
 		}
 		s.r.inc()
-		ch0 = s.r.peek()
+		ch = s.r.peek()
 	}
 
 	tok, lit = node.token, s.r.data(&pos)
@@ -370,7 +368,7 @@ func startWithSlash(s *Scanner) (tok int, pos Pos, lit string) {
 		s.r.inc()
 		startWithAsterisk := false
 		for {
-			ch0 = s.r.readByte()
+			ch0 = s.r.readCodePoint()
 			if startWithAsterisk && ch0 == '/' {
 				// Meets */, means comment end.
 				break
@@ -517,7 +515,7 @@ func scanQuotedIdent(s *Scanner) (tok int, pos Pos, lit string) {
 	s.r.inc()
 	s.buf.Reset()
 	for {
-		ch := s.r.readByte()
+		ch := s.r.readCodePoint()
 		if ch == unicode.ReplacementChar && s.r.eof() {
 			tok = unicode.ReplacementChar
 			return
@@ -581,7 +579,7 @@ func (mb *lazyBuf) data() string {
 func (s *Scanner) scanString() (tok int, pos Pos, lit string) {
 	tok, pos = stringLit, s.r.pos()
 	mb := lazyBuf{false, &s.r, &s.buf, &pos}
-	ending := s.r.readByte()
+	ending := s.r.readCodePoint()
 	ch0 := s.r.peek()
 	for !s.r.eof() {
 		if ch0 == ending {
@@ -638,7 +636,7 @@ func handleEscape(s *Scanner) rune {
 func startWithNumber(s *Scanner) (tok int, pos Pos, lit string) {
 	pos = s.r.pos()
 	tok = intLit
-	ch0 := s.r.readByte()
+	ch0 := s.r.readCodePoint()
 	if ch0 == '0' {
 		tok = intLit
 		ch1 := s.r.peek()
@@ -779,23 +777,12 @@ func (r *reader) eof() bool {
 // peek() peeks a rune from underlying reader.
 // if reader meets EOF, it will return unicode.ReplacementChar. to distinguish from
 // the real unicode.ReplacementChar, the caller should call r.eof() again to check.
-func (r *reader) peek() rune {
+func (r *reader) peek() (ch rune) {
 	if r.eof() {
 		return unicode.ReplacementChar
 	}
-	v, w := rune(r.s[r.p.Offset]), 1
-	switch {
-	case v == 0:
-		r.w = w
-		return v // illegal UTF-8 encoding
-	case v >= 0x80:
-		v, w = utf8.DecodeRuneInString(r.s[r.p.Offset:])
-		if v == utf8.RuneError && w == 1 {
-			v = rune(r.s[r.p.Offset]) // illegal UTF-8 encoding
-		}
-	}
-	r.w = w
-	return v
+	ch, r.w = utf8.DecodeRuneInString(r.s[r.p.Offset:])
+	return ch
 }
 
 // inc increase the position offset of the reader.
@@ -803,10 +790,12 @@ func (r *reader) peek() rune {
 func (r *reader) inc() {
 	if r.s[r.p.Offset] == '\n' {
 		r.p.Line++
+		r.p.Offset++
 		r.p.Col = 0
+		return
 	}
 	r.p.Offset += r.w
-	r.p.Col++
+	r.p.Col += r.w
 }
 
 func (r *reader) incN(n int) {
@@ -815,13 +804,13 @@ func (r *reader) incN(n int) {
 	}
 }
 
-func (r *reader) readByte() (ch rune) {
-	ch = r.peek()
-	if ch == unicode.ReplacementChar && r.eof() {
-		return
+func (r *reader) readCodePoint() (ch rune) {
+	if r.eof() {
+		return unicode.ReplacementChar
 	}
+	ch = r.peek()
 	r.inc()
-	return
+	return ch
 }
 
 func (r *reader) pos() Pos {
@@ -832,15 +821,13 @@ func (r *reader) data(from *Pos) string {
 	return r.s[from.Offset:r.p.Offset]
 }
 
-func (r *reader) incAsLongAs(fn func(rune) bool) rune {
-	for {
-		ch := r.peek()
-		if !fn(ch) {
+func (r *reader) incAsLongAs(predicate func(rune) bool) (ch rune) {
+	for !r.eof() {
+		ch = r.peek()
+		if !predicate(ch) {
 			return ch
-		}
-		if ch == unicode.ReplacementChar && r.eof() {
-			return 0
 		}
 		r.inc()
 	}
+	return ch
 }
